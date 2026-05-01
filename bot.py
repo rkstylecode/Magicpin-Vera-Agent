@@ -34,6 +34,10 @@ import requests as http_requests
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv(override=True)
 
 # ============================================================
 #                     CONFIGURATION
@@ -77,23 +81,28 @@ conversation_state = {}
 #                    LLM INTERFACE
 # ============================================================
 
-def call_llm(prompt: str, system_prompt: str = "", retries: int = 2) -> str:
-    """Unified LLM caller with retry logic."""
-    for attempt in range(retries + 1):
+def call_llm(prompt: str, system_prompt: str = "", retries: int = 1) -> str:
+    """Try primary provider, then fallback to Ollama if primary fails."""
+    # 1. Try Primary Provider (e.g. Groq)
+    try:
+        if LLM_PROVIDER == "groq":
+            return _call_groq(prompt, system_prompt)
+        elif LLM_PROVIDER == "gemini":
+            return _call_gemini(prompt, system_prompt)
+        elif LLM_PROVIDER == "ollama":
+            return _call_ollama(prompt, system_prompt)
+    except Exception as e:
+        log.warning(f"Primary provider ({LLM_PROVIDER}) failed: {e}")
+    
+    # 2. Fallback to Ollama if primary was not already Ollama
+    if LLM_PROVIDER != "ollama":
         try:
-            if LLM_PROVIDER == "ollama":
-                return _call_ollama(prompt, system_prompt)
-            elif LLM_PROVIDER == "gemini":
-                return _call_gemini(prompt, system_prompt)
-            elif LLM_PROVIDER == "groq":
-                return _call_groq(prompt, system_prompt)
-            else:
-                log.error(f"Unknown LLM provider: {LLM_PROVIDER}")
-                return ""
+            log.info("Attempting fallback to local Ollama (llama3.2)...")
+            # Temporarily force OLLAMA settings for the fallback call
+            return _call_ollama(prompt, system_prompt)
         except Exception as e:
-            log.warning(f"LLM call attempt {attempt+1} failed: {e}")
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
+            log.error(f"Fallback to Ollama also failed: {e}")
+            
     return ""
 
 
