@@ -318,15 +318,20 @@ TRIGGER ({trigger_kind}, urgency={trigger_urgency}):
 
     if customer_ctx:
         cu_payload = customer_ctx.get("payload", {})
+        cust_name = cu_payload.get("identity", {}).get("name", "customer")
         cu_str = json.dumps(cu_payload, default=str)
         if len(cu_str) > 600:
             cu_str = cu_str[:600]
         prompt += f"\nCUSTOMER: {cu_str}\n"
         send_as = "merchant_on_behalf"
+        target_audience = cust_name
+        task_instruction = f"TASK: Write a short WhatsApp message TO THE CUSTOMER ({cust_name}) ON BEHALF OF THE MERCHANT ({business_name})."
     else:
         send_as = "vera"
+        target_audience = owner_name or 'merchant'
+        task_instruction = f"TASK: Write a short WhatsApp message TO THE MERCHANT ({owner_name or 'merchant'}) from Vera (the AI assistant)."
 
-    prompt += f"""\nTASK: Write a short WhatsApp message for {owner_name or 'merchant'}.
+    prompt += f"""\n{task_instruction}
 - Use {category_name} voice. Include real data from above.
 - SPECIFICITY IS CRITICAL: You must cite exact numbers, percentages, dates, and names from the data provided. Never be vague.
 - Use compulsion levers: loss aversion, curiosity, effort externalization.
