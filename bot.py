@@ -328,6 +328,7 @@ TRIGGER ({trigger_kind}, urgency={trigger_urgency}):
 
     prompt += f"""\nTASK: Write a short WhatsApp message for {owner_name or 'merchant'}.
 - Use {category_name} voice. Include real data from above.
+- SPECIFICITY IS CRITICAL: You must cite exact numbers, percentages, dates, and names from the data provided. Never be vague.
 - Use compulsion levers: loss aversion, curiosity, effort externalization.
 - *** YOUR MESSAGE MUST END WITH A DIRECT QUESTION OR OFFER. ***
   Good endings: "Want me to draft it? Ready in 10 min." / "Kya main ye karun? Reply YES." / "Should I set this up?"
