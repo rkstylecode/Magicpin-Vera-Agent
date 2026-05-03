@@ -99,19 +99,20 @@ def call_llm(prompt: str, system_prompt: str = "", retries: int = 1) -> str:
         try:
             log.info("Attempting fallback to local Ollama (llama3.2)...")
             # Temporarily force OLLAMA settings for the fallback call
-            return _call_ollama(prompt, system_prompt)
+            return _call_ollama(prompt, system_prompt, model_override="llama3.2")
         except Exception as e:
             log.error(f"Fallback to Ollama also failed: {e}")
             
     return ""
 
 
-def _call_ollama(prompt: str, system_prompt: str) -> str:
+def _call_ollama(prompt: str, system_prompt: str, model_override: str = None) -> str:
+    model = model_override or LLM_MODEL
     full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
     resp = http_requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
         json={
-            "model": LLM_MODEL,
+            "model": model,
             "prompt": full_prompt,
             "stream": False,
             "format": "json",
@@ -166,20 +167,27 @@ You compose sharp, grounded, high-compulsion messages.
 
 CORE PRINCIPLES:
 1. GROUNDING: Only use facts from the provided context. NEVER fabricate statistics, dates, offers, competitor names, or research citations.
-2. SPECIFICITY: Anchor on verifiable facts — exact numbers, ₹ prices, percentages, dates, source citations (e.g., "JIDA Oct 2026 p.14"). "X% off" is generic; "Haircut @ ₹99" is specific.
+2. SPECIFICITY: Anchor on verifiable facts — exact numbers, ₹ prices, percentages, dates, source citations (e.g., "JIDA Oct 2026 p.14").
 3. CATEGORY VOICE: Match the business type's tone:
-   - Dentists/Doctors: clinical-peer tone, technical terms welcome, use "Dr." prefix, NO overclaims ("cure", "guaranteed")
+   - Dentists/Doctors: clinical-peer tone, use "Dr." prefix, NO overclaims
    - Salons: warm-practical, emoji OK, aspirational but grounded
    - Restaurants: operator-to-operator ("covers", "AOV", "delivery radius")
    - Gyms: coach voice, motivational but data-backed
    - Pharmacies: trustworthy-precise, regulatory-aware, senior-friendly
 4. MERCHANT FIT: Address by owner's first name. Reference their locality, business name, specific metrics, and active offers.
-5. SINGLE CTA: One clear, low-friction call-to-action in the last sentence. Binary YES/STOP for action triggers. Open-ended for knowledge triggers.
-6. LANGUAGE: If the merchant's languages include "hi", use natural Hindi-English code-mix (e.g., "Meera, aapke profile pe 2,410 views aaye hain pichle 30 din mein"). This is CRITICAL for scoring.
-7. BREVITY: Keep concise. No preambles ("I hope you're doing well..."). No re-introductions.
-8. COMPULSION LEVERS: Use 1-2 of: specificity, loss aversion, social proof, effort externalization, curiosity, reciprocity.
-9. HUMAN-READABLE: NEVER expose raw internal metric names (like "7d_views_pct", "ctr_pct", "delta_7d"). Convert them to natural language: "views grew 18% this week", "your click-through rate is 2.1%", "calls dropped 50% in 7 days".
-10. DO NOT copy example messages from case studies verbatim. Write original copy.
+5. *** MANDATORY CTA — MOST IMPORTANT RULE ***:
+   Your message MUST end with a SPECIFIC question or offer directed at the merchant.
+   Examples of GOOD endings:
+   - "Want me to draft it? Ready in 10 min."
+   - "Kya main ye set up karun? Reply YES."
+   - "Should I pull the checklist for you?"
+   - "Reply YES to proceed — no commitment."
+   A message that ends with a STATEMENT scores 0 on engagement. ALWAYS end with a question.
+6. LANGUAGE: If the merchant's languages include "hi", use natural Hindi-English code-mix. This is CRITICAL.
+7. BREVITY: Keep concise. No preambles. No re-introductions.
+8. COMPULSION LEVERS: Use 1-2 of: loss aversion, curiosity, social proof, effort externalization ("I'll handle it"), reciprocity.
+9. HUMAN-READABLE: NEVER expose raw metric names like "7d_views_pct". Use natural language: "views grew 18% this week".
+10. DO NOT copy example messages verbatim. Write original copy.
 
 You ALWAYS respond with valid JSON only. No markdown, no explanation outside JSON."""
 
@@ -215,49 +223,79 @@ def build_compose_prompt(merchant_ctx: dict, category_ctx: dict, trigger_ctx: di
     trigger_scope = t_payload.get("scope", "merchant")
     trigger_urgency = t_payload.get("urgency", 1)
 
-    # Build a condensed, efficient prompt with only the relevant data
-    # (instead of dumping full JSON which wastes tokens)
-    
     # Format active offers
     active_offers = [o.get("title", "") for o in offers if o.get("status") == "active"]
     offers_str = ", ".join(active_offers) if active_offers else "none"
-    
-    # Format performance
+
+    # Format performance in HUMAN-READABLE language
     perf_str = ""
     if performance:
         perf_parts = []
-        if performance.get("views"): perf_parts.append(f"views={performance['views']}")
-        if performance.get("calls"): perf_parts.append(f"calls={performance['calls']}")
-        if performance.get("directions"): perf_parts.append(f"directions={performance['directions']}")
-        if performance.get("ctr"): perf_parts.append(f"CTR={performance['ctr']}")
-        if performance.get("leads"): perf_parts.append(f"leads={performance['leads']}")
+        if performance.get("views"): perf_parts.append(f"{performance['views']} views (30d)")
+        if performance.get("calls"): perf_parts.append(f"{performance['calls']} calls (30d)")
+        if performance.get("directions"): perf_parts.append(f"{performance['directions']} direction requests")
+        if performance.get("ctr"): perf_parts.append(f"CTR {performance['ctr']:.1%}")
+        if performance.get("leads"): perf_parts.append(f"{performance['leads']} leads")
         delta = performance.get("delta_7d", {})
         if delta:
             for k, v in delta.items():
-                perf_parts.append(f"7d_{k}={v:+.0%}" if isinstance(v, float) else f"7d_{k}={v}")
+                readable_k = k.replace("_pct", "").replace("_", " ")
+                if isinstance(v, float):
+                    direction = "up" if v > 0 else "down"
+                    perf_parts.append(f"{readable_k} {direction} {abs(v):.0%} this week")
         perf_str = "; ".join(perf_parts)
-    
+
+    # Peer stats comparison
+    peer_stats = c_payload.get("peer_stats", {})
+    peer_str = ""
+    if peer_stats:
+        peer_parts = []
+        if peer_stats.get("avg_views_30d") and performance.get("views"):
+            peer_parts.append(f"peer avg views={peer_stats['avg_views_30d']}")
+        if peer_stats.get("avg_ctr") and performance.get("ctr"):
+            peer_parts.append(f"peer avg CTR={peer_stats['avg_ctr']}")
+        if peer_stats.get("avg_calls_30d") and performance.get("calls"):
+            peer_parts.append(f"peer avg calls={peer_stats['avg_calls_30d']}")
+        peer_str = ", ".join(peer_parts) if peer_parts else ""
+
     # Format customer aggregate
     cust_str = ", ".join(f"{k}={v}" for k, v in customer_agg.items()) if customer_agg else "none"
-    
+
     # Format signals
     signals_str = ", ".join(str(s) for s in signals) if signals else "none"
-    
+
     # Format review themes
     themes_str = "; ".join(
         f"{t.get('theme')}({t.get('sentiment')}, {t.get('occurrences_30d')}x)"
         for t in review_themes
     ) if review_themes else "none"
-    
-    # Voice guidelines (condensed)
+
+    # Voice guidelines
     voice_tone = voice.get("tone", "professional")
     voice_taboo = voice.get("vocab_taboo", voice.get("taboos", []))
-    
+
+    # Resolve digest items from category context for source citations
+    digest_str = ""
+    t_inner = t_payload.get("payload", {})
+    ref_id = t_inner.get("top_item_id", "") or t_inner.get("digest_item_id", "") or t_inner.get("alert_id", "")
+    if ref_id and c_payload.get("digest"):
+        for d in c_payload["digest"]:
+            if d.get("id") == ref_id:
+                digest_str = f"SOURCE: {d.get('source','')} — {d.get('title','')}. {d.get('summary','')}. Action: {d.get('actionable','')}"
+                break
+
+    # Conversation history for continuity
+    conv_history = m_payload.get("conversation_history", [])
+    conv_str = ""
+    if conv_history:
+        last = conv_history[-1]
+        conv_str = f"Last conversation: {last.get('from','')} said: \"{last.get('body','')[:100]}\" ({last.get('engagement','')})"
+
     # Trigger payload condensed
     trigger_payload_str = json.dumps(t_payload.get("payload", t_payload), default=str)
     if len(trigger_payload_str) > 800:
         trigger_payload_str = trigger_payload_str[:800]
-    
+
     prompt = f"""COMPOSE MESSAGE
 
 CATEGORY: {category_name}
@@ -266,13 +304,16 @@ Voice: {voice_tone}. Taboos: {voice_taboo[:5]}.
 MERCHANT: {business_name} ({owner_name}), {locality} {city}
 Language: {language_pref}
 Performance: {perf_str}
+{f'Peer benchmarks: {peer_str}' if peer_str else ''}
 Active offers: {offers_str}
 Customers: {cust_str}
 Signals: {signals_str}
 Reviews: {themes_str}
+{f'{conv_str}' if conv_str else ''}
 
 TRIGGER ({trigger_kind}, urgency={trigger_urgency}):
 {trigger_payload_str}
+{f'{digest_str}' if digest_str else ''}
 """
 
     if customer_ctx:
@@ -287,10 +328,14 @@ TRIGGER ({trigger_kind}, urgency={trigger_urgency}):
 
     prompt += f"""\nTASK: Write a short WhatsApp message for {owner_name or 'merchant'}.
 - Use {category_name} voice. Include real data from above.
-- ONE low-friction CTA at end. No preambles.
+- Use compulsion levers: loss aversion, curiosity, effort externalization.
+- *** YOUR MESSAGE MUST END WITH A DIRECT QUESTION OR OFFER. ***
+  Good endings: "Want me to draft it? Ready in 10 min." / "Kya main ye karun? Reply YES." / "Should I set this up?"
+  BAD endings: statements like "you need to update records" or "this is important"
+  A message without a question at the end FAILS. This is the #1 scoring criterion.
 
 JSON only:
-{{"body": "<msg>", "cta": "open_ended", "send_as": "{send_as}", "suppression_key": "{trigger_kind}:{category_name}:{datetime.now(timezone.utc).strftime('%Y-W%V')}", "rationale": "<1-line>"}}"""
+{{"body": "<msg that ENDS with a question>", "cta": "open_ended", "send_as": "{send_as}", "suppression_key": "{trigger_kind}:{category_name}:{datetime.now(timezone.utc).strftime('%Y-W%V')}", "rationale": "<1-line>"}}"""
 
     return prompt
 
@@ -307,7 +352,7 @@ RULES:
 - YES/agree/proceed/commit ("ok", "lets do it", "sounds good") → action:"send", respond with a CONCRETE NEXT STEP. Your response MUST begin with the word "Done," or "Sending," or "Proceeding," or "Next,". Do NOT ask qualifying questions.
 - QUESTION → action:"send", answer concisely + include a CTA
 - NO/decline/not interested → action:"end", close gracefully, respect their decision
-- AUTO-REPLY (out of office, automated, vacation) → action:"end"
+- AUTO-REPLY (out of office, automated, vacation) → action:"wait"
 - HOSTILE (angry, rude, spam, stop) → action:"end", acknowledge + offer to pause
 - Turn >= 4 → action:"end", wrap up politely
 - Keep responses concise. Use Hindi-English mix if appropriate.
@@ -316,6 +361,44 @@ IMPORTANT: When the merchant commits, switch to ACTION mode — tell them what y
 
 JSON only:
 {{"action": "send" or "wait" or "end", "body": "<response>", "rationale": "<1-line>"}}"""
+
+
+def build_customer_reply_prompt(message: str, turn_number: int, conv_id: str,
+                                merchant_ctx: dict = None, customer_ctx: dict = None) -> str:
+    """Build prompt for handling CUSTOMER replies — respond AS the merchant."""
+    m_payload = (merchant_ctx or {}).get("payload", {})
+    identity = m_payload.get("identity", {})
+    biz_name = identity.get("name", "the business")
+    owner_name = identity.get("owner_first_name", "")
+    locality = identity.get("locality", "")
+    offers = m_payload.get("offers", [])
+    active_offers = [o.get("title", "") for o in offers if o.get("status") == "active"]
+
+    c_payload = (customer_ctx or {}).get("payload", {}) if customer_ctx else {}
+    customer_name = c_payload.get("identity", {}).get("name", c_payload.get("name", ""))
+
+    return f"""A CUSTOMER replied to a message sent on behalf of {biz_name}.
+You are replying AS {owner_name or biz_name} (the merchant), NOT as Vera the AI.
+Address the CUSTOMER directly.
+
+CONVERSATION: {conv_id}
+TURN: {turn_number}
+CUSTOMER SAID: "{message}"
+CUSTOMER NAME: {customer_name or 'the customer'}
+BUSINESS: {biz_name}, {locality}
+OWNER: {owner_name}
+ACTIVE OFFERS: {', '.join(active_offers) if active_offers else 'none'}
+
+RULES:
+- You are the merchant's team replying to their customer. NEVER mention Vera, magicpin dashboard, or internal systems.
+- Address the customer by name: "{customer_name or 'Customer'}".
+- If they confirm a slot/booking/date/time, confirm the EXACT details back (date, time, service, price from offers).
+- If they ask a question, answer helpfully as the business.
+- Be warm, specific, professional. Use Hindi-English mix if appropriate.
+- Include the business name and location in confirmations.
+
+JSON only:
+{{"action": "send", "body": "<customer-facing response from merchant>", "rationale": "<1-line>"}}"""
 
 
 # ============================================================
@@ -623,9 +706,9 @@ async def handle_reply(request: Request):
     if any(s in msg_lower for s in auto_signals):
         log.info(f"[{conv_id}] Auto-reply detected at turn {turn}")
         return {
-            "action": "end",
+            "action": "wait",
             "body": "",
-            "rationale": "Auto-reply detected; ending to avoid infinite loop"
+            "rationale": "Auto-reply detected; waiting instead of responding"
         }
 
     # Repeated message detection (3+ same messages = auto-reply)
@@ -634,9 +717,9 @@ async def handle_reply(request: Request):
         if last_three[0] == last_three[1] == last_three[2]:
             log.info(f"[{conv_id}] Repeated message detected")
             return {
-                "action": "end",
+                "action": "wait",
                 "body": "",
-                "rationale": "Same message repeated 3+ times; auto-reply behavior detected"
+                "rationale": "Same message repeated 3+ times; assuming automated response and waiting"
             }
 
     # Hostile / opt-out
@@ -663,7 +746,17 @@ async def handle_reply(request: Request):
         }
 
     # === LLM-POWERED INTENT DETECTION ===
-    prompt = build_reply_prompt(message, turn, conv_id)
+    merchant_id = data.get("merchant_id", "")
+    customer_id = data.get("customer_id", None)
+
+    if from_role == "customer":
+        # Customer replying — respond AS the merchant, addressed to the customer
+        merchant_ctx = context_store["merchant"].get(merchant_id)
+        customer_ctx = context_store["customer"].get(customer_id) if customer_id else None
+        prompt = build_customer_reply_prompt(message, turn, conv_id, merchant_ctx, customer_ctx)
+    else:
+        prompt = build_reply_prompt(message, turn, conv_id)
+
     raw = call_llm(prompt, SYSTEM_PROMPT)
     result = parse_llm_json(raw, ["action"])
 
@@ -679,15 +772,35 @@ async def handle_reply(request: Request):
 
     # === KEYWORD FALLBACK ===
     positive = ["yes", "sure", "okay", "ok", "go ahead", "proceed", "haan", "theek",
-                 "sounds good", "interested", "tell me", "kar do", "chalega", "chalo"]
+                 "sounds good", "interested", "tell me", "kar do", "chalega", "chalo",
+                 "book", "please", "confirm"]
     if any(s in msg_lower for s in positive):
-        return {
-            "action": "send",
-            "body": "Great, setting that up for you now. You'll see the update on your magicpin dashboard shortly!",
-            "rationale": "Positive intent detected via keywords; fulfilling"
-        }
+        if from_role == "customer":
+            # Customer confirmed — respond as merchant with specific confirmation
+            m_ctx = context_store["merchant"].get(merchant_id, {})
+            m_p = m_ctx.get("payload", {}) if m_ctx else {}
+            biz = m_p.get("identity", {}).get("name", "us")
+            owner = m_p.get("identity", {}).get("owner_first_name", "")
+            locality = m_p.get("identity", {}).get("locality", "")
+            return {
+                "action": "send",
+                "body": f"Done! Your appointment is confirmed at {biz}{', ' + locality if locality else ''}. {owner + ' ' if owner else ''}will see you then. Reply if you need to reschedule. \u00f0\u009f\u0098\u008a",
+                "rationale": "Customer confirmed booking; acknowledging as merchant with details"
+            }
+        else:
+            return {
+                "action": "send",
+                "body": "Done! Setting that up for you right now. You'll see the changes live on your profile shortly.",
+                "rationale": "Positive intent detected via keywords; fulfilling"
+            }
 
     # Default: graceful end
+    if from_role == "customer":
+        return {
+            "action": "send",
+            "body": "Thank you for your message! We'll get back to you shortly.",
+            "rationale": "Customer message — acknowledging as merchant"
+        }
     return {
         "action": "end",
         "body": "Thanks for your response! I'll share relevant updates when they come up.",
